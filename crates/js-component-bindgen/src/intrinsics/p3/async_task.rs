@@ -49,6 +49,24 @@ pub enum AsyncTaskIntrinsic {
     ///
     ContextGet,
 
+    /// Wrap a guest realloc so each call runs with fresh context slots
+    ///
+    /// The host calls a guest's realloc to lower values into its memory, possibly while one of
+    /// the guest's tasks is suspended. Every such call runs as though on a fresh thread: it reads
+    /// zeroed context slots, and what it writes to them is discarded when it returns. No thread's
+    /// own slots are involved. Realloc also runs without leaving the component.
+    ///
+    /// # Intrinsic implementation function
+    ///
+    /// The function that implements this intrinsic has the following definition:
+    ///
+    /// ```ts
+    /// type Realloc = (oldPtr: number, oldSize: number, alignment: number, newSize: number) => number | Promise<number>;
+    /// function isolateRealloc(componentIdx: number, realloc: Realloc): Realloc;
+    /// ```
+    ///
+    IsolateRealloc,
+
     /// Return a value to a caller of an lifted export.
     ///
     /// Implements `canon task.return`.
@@ -329,6 +347,7 @@ impl AsyncTaskIntrinsic {
             Self::AsyncThreadClass.name(),
             Self::ContextGet.name(),
             Self::ContextSet.name(),
+            Self::IsolateRealloc.name(),
             Self::GetCurrentTask.name(),
             Self::GetCurrentThread.name(),
             Self::CurrentThreadOrThrow.name(),
@@ -371,6 +390,7 @@ impl AsyncTaskIntrinsic {
             Self::AsyncThreadClass => "AsyncThread",
             Self::ContextGet => "contextGet",
             Self::ContextSet => "contextSet",
+            Self::IsolateRealloc => "isolateRealloc",
             Self::GetCurrentTask => "getCurrentTask",
             Self::GetCurrentThread => "getCurrentThread",
             Self::CurrentThreadOrThrow => "currentThreadOrThrow",
@@ -443,6 +463,40 @@ impl AsyncTaskIntrinsic {
                 output.push_str(&format!("const {name} = 0xFFFF_FFFF;"));
             }
 
+            Self::IsolateRealloc => {
+                let isolate_realloc_fn = render_args.require_intrinsic(Self::IsolateRealloc);
+                let get_or_create_async_state_fn = render_args.intrinsic_call_prefix(
+                    Intrinsic::Component(ComponentIntrinsic::GetOrCreateAsyncState),
+                );
+                let global_current_thread_meta =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
+
+                uwriteln!(
+                    output,
+                    r#"
+                      function {isolate_realloc_fn}(componentIdx, realloc) {{
+                          return (...args) => {{
+                              const state = {get_or_create_async_state_fn}componentIdx);
+                              const previousReallocContext = {global_current_thread_meta}.reallocContext ?? null;
+                              const previousMayLeave = state.mayLeave;
+
+                              // A realloc which may not leave its component instance cannot suspend,
+                              // so it has finished by the time the call returns, even where the call
+                              // yields a promise.
+                              {global_current_thread_meta}.reallocContext = {{ componentIdx, storage: [0, 0] }};
+                              state.mayLeave = false;
+                              try {{
+                                  return realloc(...args);
+                              }} finally {{
+                                  state.mayLeave = previousMayLeave;
+                                  {global_current_thread_meta}.reallocContext = previousReallocContext;
+                              }}
+                          }};
+                      }}
+                    "#
+                );
+            }
+
             Self::ContextSet => {
                 let debug_log_fn = render_args.require_intrinsic(Intrinsic::DebugLog);
                 let context_set_fn = render_args.require_intrinsic(Self::ContextSet);
@@ -450,6 +504,8 @@ impl AsyncTaskIntrinsic {
                 let type_check_i32 = render_args.require_intrinsic(Intrinsic::TypeCheckValidI32);
                 let get_global_current_thread_meta_fn =
                     render_args.intrinsic_call_prefix(Intrinsic::GetGlobalCurrentThreadMetaFn);
+                let global_current_thread_meta =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
 
                 uwriteln!(
                     output,
@@ -458,6 +514,14 @@ impl AsyncTaskIntrinsic {
                           const {{ slot }} = ctx;
                           if (slot === undefined) {{ throw new TypeError("missing slot"); }}
                           if (!({type_check_i32}(value))) {{ throw new Error('invalid value for context set (not valid i32)'); }}
+
+                          // A realloc called by the host runs with slots of its own.
+                          const reallocContext = {global_current_thread_meta}.reallocContext;
+                          if (reallocContext && reallocContext.componentIdx === ctx.componentIdx) {{
+                              if (slot < 0 || slot >= reallocContext.storage.length) {{ throw new Error('invalid slot for current thread'); }}
+                              reallocContext.storage[slot] = value;
+                              return;
+                          }}
 
                           // Guest callbacks use their component's task register. FACT
                           // adapters have no component index; post-return also runs
@@ -506,6 +570,8 @@ impl AsyncTaskIntrinsic {
                 let current_thread_get_fn = render_args.require_intrinsic(Self::GetCurrentThread);
                 let get_global_current_thread_meta_fn =
                     render_args.intrinsic_call_prefix(Intrinsic::GetGlobalCurrentThreadMetaFn);
+                let global_current_thread_meta =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
 
                 uwriteln!(
                     output,
@@ -513,6 +579,13 @@ impl AsyncTaskIntrinsic {
                       function {context_get_fn}(ctx) {{
                           const {{ slot }} = ctx;
                           if (slot === undefined) {{ throw new TypeError("missing slot"); }}
+
+                          // A realloc called by the host runs with slots of its own.
+                          const reallocContext = {global_current_thread_meta}.reallocContext;
+                          if (reallocContext && reallocContext.componentIdx === ctx.componentIdx) {{
+                              if (slot < 0 || slot >= reallocContext.storage.length) {{ throw new Error('invalid slot for current thread'); }}
+                              return reallocContext.storage[slot];
+                          }}
 
                           // Guest callbacks use their component's task register. FACT
                           // adapters have no component index; post-return also runs

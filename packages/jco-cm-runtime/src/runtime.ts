@@ -344,9 +344,16 @@ export interface TaskMeta {
     taskID: bigint;
     componentIdx: number;
 }
+/** Context slots a guest realloc runs with, in place of those of any thread. */
+export interface ReallocContext {
+    componentIdx: number;
+    storage: number[];
+}
 export interface TaskRegisters {
     [componentIdx: number]: TaskMeta | null | undefined;
     current?: TaskMeta | null;
+    /** Set for the duration of a host call to a guest realloc. */
+    reallocContext?: ReallocContext | null;
 }
 export interface MemoryMeta {
     componentIdx: number;
@@ -1719,6 +1726,11 @@ export interface AsyncTaskModule {
         value: number,
     ) => void;
     readonly contextGet: (context: ThreadLookupContext, options: { componentIdx?: number; slot: number }) => number;
+    readonly isolateRealloc: (
+        context: ThreadLookupContext,
+        componentIdx: number,
+        realloc: AsyncStringRealloc,
+    ) => AsyncStringRealloc;
     readonly taskReturn: (context: TaskReturnRuntimeContext, options: TaskReturnOptions, ...params: unknown[]) => void;
     readonly subtaskDrop: (context: SubtaskDropContext, componentIdx: number, rep: number) => void;
     readonly asyncYield: (
@@ -1812,6 +1824,7 @@ export interface HostPromisingPlatform {
 export interface HostPrepareContext extends TaskLookupContext, TrapContext {
     readonly creation: TaskCreateContext;
     readonly mayBlock: TaskMayBlockGlobal;
+    readonly lookup: ComponentStateLookupContext;
 }
 export interface HostSyncStartContext extends TaskLookupContext {
     readonly componentIdxs: readonly number[];
