@@ -2,7 +2,7 @@ import { isPromiseLike } from './core/promises.js';
 import type { CoreModule, TaskMeta, TaskRegisters } from '../runtime.js';
 import { debugLog } from './core/debug.js';
 
-export const initializeTaskRegisters: CoreModule['initializeTaskRegisters'] = () => ({});
+export const initializeTaskRegisters: CoreModule['initializeTaskRegisters'] = () => ({ storage: {}, threadTables: {} });
 
 function validate(args: TaskMeta) {
     if (!args) {
@@ -27,6 +27,10 @@ export const getCurrentTaskMeta: CoreModule['getCurrentTaskMeta'] = (registers, 
 export const setCurrentTaskMeta: CoreModule['setCurrentTaskMeta'] = (registers, args) => {
     validate(args);
     const { taskID, threadID, componentIdx } = args;
+    // Resolve storage once at entry; context.get/set only dereference the active slots.
+    const thread = registers.threadTables?.[componentIdx]?.get(threadID);
+    const storage = (registers.storage ??= {});
+    storage.current = storage[componentIdx] = thread?.taskID() === taskID ? thread.contextStorage : undefined;
     return (registers.current = registers[componentIdx] = { taskID, threadID, componentIdx });
 };
 
@@ -36,11 +40,14 @@ export function withCurrentTaskMeta<T>(registers: TaskRegisters, args: TaskMeta 
     if (!args.fn) {
         throw new TypeError('missing fn');
     }
-    const { taskID, threadID, componentIdx, fn } = args;
+    const { componentIdx, fn } = args;
     const previous = registers[componentIdx] ?? null;
     const previousCurrent = registers.current ?? null;
+    const storage = (registers.storage ??= {});
+    const previousStorage = storage[componentIdx];
+    const previousCurrentStorage = storage.current;
     try {
-        registers.current = registers[componentIdx] = { taskID, threadID, componentIdx };
+        setCurrentTaskMeta(registers, args);
         return fn();
     } catch (error) {
         debugLog('error while executing sync callee/callback', { ...args, err: error });
@@ -48,6 +55,8 @@ export function withCurrentTaskMeta<T>(registers: TaskRegisters, args: TaskMeta 
     } finally {
         registers[componentIdx] = previous;
         registers.current = previousCurrent;
+        storage[componentIdx] = previousStorage;
+        storage.current = previousCurrentStorage;
     }
 }
 
@@ -63,19 +72,26 @@ export function withCurrentTaskMetaAsync<T>(
     const { taskID, threadID, componentIdx, fn } = args;
     const previous = registers[componentIdx] ?? null;
     const previousCurrent = registers.current ?? null;
+    const storage = (registers.storage ??= {});
+    const previousStorage = storage[componentIdx];
+    const previousCurrentStorage = storage.current;
     let result: T;
     try {
-        registers.current = registers[componentIdx] = { taskID, threadID, componentIdx };
+        setCurrentTaskMeta(registers, args);
         result = fn();
     } catch (error) {
         debugLog('error while executing sync callee/callback', { ...args, err: error });
         registers[componentIdx] = previous;
         registers.current = previousCurrent;
+        storage[componentIdx] = previousStorage;
+        storage.current = previousCurrentStorage;
         throw error;
     }
     if (!isPromiseLike(result)) {
         registers[componentIdx] = previous;
         registers.current = previousCurrent;
+        storage[componentIdx] = previousStorage;
+        storage.current = previousCurrentStorage;
         return result;
     }
     return (async (): Promise<Awaited<T>> => {
@@ -88,9 +104,11 @@ export function withCurrentTaskMetaAsync<T>(
             // A later thread of the same task may already own either register.
             if (registers[componentIdx]?.threadID === threadID && registers[componentIdx]?.taskID === taskID) {
                 registers[componentIdx] = null;
+                storage[componentIdx] = undefined;
             }
             if (registers.current?.threadID === threadID && registers.current?.taskID === taskID) {
                 registers.current = null;
+                storage.current = undefined;
             }
         }
     })();
@@ -114,7 +132,10 @@ export const clearCurrentTaskMeta: CoreModule['clearCurrentTaskMeta'] = async (r
         throw new Error(`component idx [${meta.componentIdx}] != requested idx [${componentIdx}]`);
     }
     registers[componentIdx] = null;
+    const storage = (registers.storage ??= {});
+    storage[componentIdx] = undefined;
     if (registers.current?.threadID === threadID && registers.current?.taskID === taskID) {
         registers.current = null;
+        storage.current = undefined;
     }
 };

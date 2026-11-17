@@ -1,8 +1,7 @@
-import type { ThreadLookupContext, AsyncTaskModule } from '../../runtime.js';
+import type { ThreadLookupContext, AsyncTaskModule, AsyncStringRealloc } from '../../runtime.js';
 import { typeCheckValidI32 } from './helpers.js';
-import { getCurrentTaskMeta } from '../task-context.js';
-import { getCurrentThread } from './thread-operations.js';
 import { debugLog } from '../core/debug.js';
+import { getOrCreateAsyncState } from '../component.js';
 
 /** Implements `canon context.set`. */
 export function contextSet(
@@ -20,54 +19,23 @@ export function contextSet(
     if (!typeCheckValidI32(value)) {
         throw new Error('invalid value for context set (not valid i32)');
     }
-    // Guest callbacks use their component's task register. FACT
-    // adapters have no component index; post-return also runs
-    // after the callee register is cleared. Both use the executing
-    // task, whose context FACT temporarily saves and restores.
-    let currentThreadMeta = getCurrentTaskMeta(_context.registers, ctx.componentIdx);
-    let threadMeta = currentThreadMeta
-        ? getCurrentThread(
-              _context,
-              currentThreadMeta.componentIdx,
-              currentThreadMeta.threadID,
-              currentThreadMeta.taskID,
-          )
-        : undefined;
-    // A post-return may run after the callee has exited. Its
-    // per-component register can therefore name a task which is
-    // no longer live; fall back to FACT's executing task.
-    if (!threadMeta) {
-        currentThreadMeta = getCurrentTaskMeta(_context.registers);
-        threadMeta = currentThreadMeta
-            ? getCurrentThread(
-                  _context,
-                  currentThreadMeta.componentIdx,
-                  currentThreadMeta.threadID,
-                  currentThreadMeta.taskID,
-              )
-            : undefined;
-    }
-    if (!threadMeta) {
-        throw new Error(
-            `missing/incomplete global current thread meta for component idx [${ctx.componentIdx}] during context set`,
-        );
-    }
-    const task = threadMeta.thread;
-    if (!task) {
-        throw new Error('invalid/missing current thread in metadata while setting context');
+    // FACT adapters and post-return use the executing frame when the component's thread has exited.
+    const active = _context.registers.storage;
+    const storage =
+        (ctx.componentIdx === undefined ? undefined : active?.[ctx.componentIdx]?.slots) ?? active?.current?.slots;
+    if (!storage) {
+        throw new Error(`missing active context storage for component idx [${ctx.componentIdx}]`);
     }
     debugLog('[contextSet()] args', {
         slot,
         value,
-        storage: task.storage,
-        threadID: task.id(),
-        taskID: threadMeta.task.id(),
-        componentIdx: task.componentIdx(),
+        storage,
+        componentIdx: ctx.componentIdx,
     });
-    if (slot < 0 || slot >= task.storage.length) {
+    if (slot < 0 || slot >= storage.length) {
         throw new Error('invalid slot for current thread');
     }
-    task.storage[slot] = value;
+    storage[slot] = value;
 }
 
 /** Implements `canon context.get`. */
@@ -82,51 +50,55 @@ export function contextGet(
     if (slot === undefined) {
         throw new TypeError('missing slot');
     }
-    // Guest callbacks use their component's task register. FACT
-    // adapters have no component index; post-return also runs
-    // after the callee register is cleared. Both use the executing
-    // task, whose context FACT temporarily saves and restores.
-    let currentThreadMeta = getCurrentTaskMeta(_context.registers, ctx.componentIdx);
-    let threadMeta = currentThreadMeta
-        ? getCurrentThread(
-              _context,
-              currentThreadMeta.componentIdx,
-              currentThreadMeta.threadID,
-              currentThreadMeta.taskID,
-          )
-        : undefined;
-    // A post-return may run after the callee has exited. Its
-    // per-component register can therefore name a task which is
-    // no longer live; fall back to FACT's executing task.
-    if (!threadMeta) {
-        currentThreadMeta = getCurrentTaskMeta(_context.registers);
-        threadMeta = currentThreadMeta
-            ? getCurrentThread(
-                  _context,
-                  currentThreadMeta.componentIdx,
-                  currentThreadMeta.threadID,
-                  currentThreadMeta.taskID,
-              )
-            : undefined;
-    }
-    if (!threadMeta) {
-        throw new Error(
-            `missing/incomplete global current thread meta for component idx [${ctx.componentIdx}] during context get`,
-        );
-    }
-    const task = threadMeta.thread;
-    if (!task) {
-        throw new Error('invalid/missing current thread in metadata while getting context');
+    // FACT adapters and post-return use the executing frame when the component's thread has exited.
+    const active = _context.registers.storage;
+    const storage =
+        (ctx.componentIdx === undefined ? undefined : active?.[ctx.componentIdx]?.slots) ?? active?.current?.slots;
+    if (!storage) {
+        throw new Error(`missing active context storage for component idx [${ctx.componentIdx}]`);
     }
     debugLog('[contextGet()] args', {
         slot,
-        storage: task.storage,
-        threadID: task.id(),
-        taskID: threadMeta.task.id(),
-        componentIdx: task.componentIdx(),
+        storage,
+        componentIdx: ctx.componentIdx,
     });
-    if (slot < 0 || slot >= task.storage.length) {
+    if (slot < 0 || slot >= storage.length) {
         throw new Error('invalid slot for current thread');
     }
-    return task.storage[slot];
+    return storage[slot];
+}
+
+/**
+ * Run each host call to a guest realloc with fresh slots in the ordinary active storage registers.
+ *
+ * Guest execution must finish synchronously: mayLeave forbids calls that could suspend it.
+ * A JSPI wrapper can still return a promise, but slot restoration must not wait for its reactions.
+ *
+ * @param context - component state and active execution registers
+ * @param componentIdx - component instance owning the allocator
+ * @param realloc - guest allocator, possibly wrapped by WebAssembly.promising
+ * @returns an allocator with the same four-argument signature
+ */
+export function isolateRealloc(
+    context: ThreadLookupContext,
+    componentIdx: number,
+    realloc: AsyncStringRealloc,
+): AsyncStringRealloc {
+    return (oldPtr, oldSize, alignment, newSize) => {
+        const state = getOrCreateAsyncState(context.lookup, componentIdx);
+        const storage = (context.registers.storage ??= {});
+        const previousStorage = storage[componentIdx];
+        const previousCurrentStorage = storage.current;
+        const previousMayLeave = state.mayLeave;
+
+        storage.current = storage[componentIdx] = { slots: [0, 0] };
+        state.mayLeave = false;
+        try {
+            return realloc(oldPtr, oldSize, alignment, newSize);
+        } finally {
+            state.mayLeave = previousMayLeave;
+            storage[componentIdx] = previousStorage;
+            storage.current = previousCurrentStorage;
+        }
+    };
 }

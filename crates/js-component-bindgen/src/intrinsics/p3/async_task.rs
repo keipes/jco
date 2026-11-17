@@ -49,6 +49,24 @@ pub enum AsyncTaskIntrinsic {
     ///
     ContextGet,
 
+    /// Wrap a guest realloc so each call runs with fresh context slots
+    ///
+    /// The host calls a guest's realloc to lower values into its memory, possibly while one of
+    /// the guest's tasks is suspended. Every such call runs as though on a fresh thread: it reads
+    /// zeroed context slots, and what it writes to them is discarded when it returns. No thread's
+    /// own slots are involved. Realloc also runs without leaving the component.
+    ///
+    /// # Intrinsic implementation function
+    ///
+    /// The function that implements this intrinsic has the following definition:
+    ///
+    /// ```ts
+    /// type Realloc = (oldPtr: number, oldSize: number, alignment: number, newSize: number) => number | Promise<number>;
+    /// function isolateRealloc(componentIdx: number, realloc: Realloc): Realloc;
+    /// ```
+    ///
+    IsolateRealloc,
+
     /// Return a value to a caller of an lifted export.
     ///
     /// Implements `canon task.return`.
@@ -329,6 +347,7 @@ impl AsyncTaskIntrinsic {
             Self::AsyncThreadClass.name(),
             Self::ContextGet.name(),
             Self::ContextSet.name(),
+            Self::IsolateRealloc.name(),
             Self::GetCurrentTask.name(),
             Self::GetCurrentThread.name(),
             Self::CurrentThreadOrThrow.name(),
@@ -370,6 +389,7 @@ impl AsyncTaskIntrinsic {
             Self::AsyncTaskClass => "AsyncTask",
             Self::AsyncThreadClass => "AsyncThread",
             Self::ContextGet => "contextGet",
+            Self::IsolateRealloc => "isolateRealloc",
             Self::ContextSet => "contextSet",
             Self::GetCurrentTask => "getCurrentTask",
             Self::GetCurrentThread => "getCurrentThread",
@@ -443,13 +463,49 @@ impl AsyncTaskIntrinsic {
                 output.push_str(&format!("const {name} = 0xFFFF_FFFF;"));
             }
 
+            Self::IsolateRealloc => {
+                let isolate_realloc_fn = render_args.require_intrinsic(Self::IsolateRealloc);
+                let get_or_create_async_state_fn = render_args.intrinsic_call_prefix(
+                    Intrinsic::Component(ComponentIntrinsic::GetOrCreateAsyncState),
+                );
+                let global_current_thread_meta =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
+
+                uwriteln!(
+                    output,
+                    r#"
+                      function {isolate_realloc_fn}(componentIdx, realloc) {{
+                          return (...args) => {{
+                              const state = {get_or_create_async_state_fn}componentIdx);
+                              const storage = {global_current_thread_meta}.storage ??= {{}};
+                              const previousStorage = storage[componentIdx];
+                              const previousCurrentStorage = storage.current;
+                              const previousMayLeave = state.mayLeave;
+
+                              // A realloc which may not leave its component instance cannot suspend,
+                              // so it has finished by the time the call returns, even where the call
+                              // yields a promise.
+                              storage.current = storage[componentIdx] = {{ slots: [0, 0] }};
+                              state.mayLeave = false;
+                              try {{
+                                  return realloc(...args);
+                              }} finally {{
+                                  state.mayLeave = previousMayLeave;
+                                  storage[componentIdx] = previousStorage;
+                                  storage.current = previousCurrentStorage;
+                              }}
+                          }};
+                      }}
+                    "#
+                );
+            }
+
             Self::ContextSet => {
                 let debug_log_fn = render_args.require_intrinsic(Intrinsic::DebugLog);
                 let context_set_fn = render_args.require_intrinsic(Self::ContextSet);
-                let current_thread_get_fn = render_args.require_intrinsic(Self::GetCurrentThread);
                 let type_check_i32 = render_args.require_intrinsic(Intrinsic::TypeCheckValidI32);
-                let get_global_current_thread_meta_fn =
-                    render_args.intrinsic_call_prefix(Intrinsic::GetGlobalCurrentThreadMetaFn);
+                let current_registers =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
 
                 uwriteln!(
                     output,
@@ -459,42 +515,22 @@ impl AsyncTaskIntrinsic {
                           if (slot === undefined) {{ throw new TypeError("missing slot"); }}
                           if (!({type_check_i32}(value))) {{ throw new Error('invalid value for context set (not valid i32)'); }}
 
-                          // Guest callbacks use their component's task register. FACT
-                          // adapters have no component index; post-return also runs
-                          // after the callee register is cleared. Both use the executing
-                          // task, whose context FACT temporarily saves and restores.
-                          let currentThreadMeta = {get_global_current_thread_meta_fn}ctx.componentIdx);
-                          let threadMeta = currentThreadMeta
-                              ? {current_thread_get_fn}(currentThreadMeta.componentIdx, currentThreadMeta.threadID, currentThreadMeta.taskID)
-                              : undefined;
-
-                          // A post-return may run after the callee has exited. Its
-                          // per-component register can therefore name a task which is
-                          // no longer live; fall back to FACT's executing task.
-                          if (!threadMeta) {{
-                              currentThreadMeta = {get_global_current_thread_meta_fn});
-                              threadMeta = currentThreadMeta
-                                  ? {current_thread_get_fn}(currentThreadMeta.componentIdx, currentThreadMeta.threadID, currentThreadMeta.taskID)
-                                  : undefined;
+                          // Exited component frames fall back to FACT's executing storage.
+                          const active = {current_registers}.storage;
+                          const storage = active?.[ctx.componentIdx]?.slots ?? active?.current?.slots;
+                          if (!storage) {{
+                              throw new Error(`missing active context storage for component idx [${{ctx.componentIdx}}]`);
                           }}
-                          if (!threadMeta) {{
-                              throw new Error(`missing/incomplete global current thread meta for component idx [${{ctx.componentIdx}}] during context set`);
-                          }}
-
-                          const thread = threadMeta.thread;
-                          if (!thread) {{ throw new Error('invalid/missing current thread in metadata while setting context'); }}
 
                           {debug_log_fn}('[{context_set_fn}()] args', {{
                               slot,
                               value,
-                              storage: thread.storage,
-                              threadID: thread.id(),
-                              taskID: threadMeta.task.id(),
-                              componentIdx: thread.componentIdx(),
+                              storage,
+                              componentIdx: ctx.componentIdx,
                           }});
 
-                          if (slot < 0 || slot >= thread.storage.length) {{ throw new Error('invalid slot for current thread'); }}
-                          thread.storage[slot] = value;
+                          if (slot < 0 || slot >= storage.length) {{ throw new Error('invalid slot for current thread'); }}
+                          storage[slot] = value;
                       }}
                     "#
                 );
@@ -503,9 +539,8 @@ impl AsyncTaskIntrinsic {
             Self::ContextGet => {
                 let debug_log_fn = render_args.require_intrinsic(Intrinsic::DebugLog);
                 let context_get_fn = render_args.require_intrinsic(Self::ContextGet);
-                let current_thread_get_fn = render_args.require_intrinsic(Self::GetCurrentThread);
-                let get_global_current_thread_meta_fn =
-                    render_args.intrinsic_call_prefix(Intrinsic::GetGlobalCurrentThreadMetaFn);
+                let current_registers =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
 
                 uwriteln!(
                     output,
@@ -514,42 +549,22 @@ impl AsyncTaskIntrinsic {
                           const {{ slot }} = ctx;
                           if (slot === undefined) {{ throw new TypeError("missing slot"); }}
 
-                          // Guest callbacks use their component's task register. FACT
-                          // adapters have no component index; post-return also runs
-                          // after the callee register is cleared. Both use the executing
-                          // task, whose context FACT temporarily saves and restores.
-                          let currentThreadMeta = {get_global_current_thread_meta_fn}ctx.componentIdx);
-                          let threadMeta = currentThreadMeta
-                              ? {current_thread_get_fn}(currentThreadMeta.componentIdx, currentThreadMeta.threadID, currentThreadMeta.taskID)
-                              : undefined;
-
-                          // A post-return may run after the callee has exited. Its
-                          // per-component register can therefore name a task which is
-                          // no longer live; fall back to FACT's executing task.
-                          if (!threadMeta) {{
-                              currentThreadMeta = {get_global_current_thread_meta_fn});
-                              threadMeta = currentThreadMeta
-                                  ? {current_thread_get_fn}(currentThreadMeta.componentIdx, currentThreadMeta.threadID, currentThreadMeta.taskID)
-                                  : undefined;
+                          // Exited component frames fall back to FACT's executing storage.
+                          const active = {current_registers}.storage;
+                          const storage = active?.[ctx.componentIdx]?.slots ?? active?.current?.slots;
+                          if (!storage) {{
+                              throw new Error(`missing active context storage for component idx [${{ctx.componentIdx}}]`);
                           }}
-                          if (!threadMeta) {{
-                              throw new Error(`missing/incomplete global current thread meta for component idx [${{ctx.componentIdx}}] during context get`);
-                          }}
-
-                          const thread = threadMeta.thread;
-                          if (!thread) {{ throw new Error('invalid/missing current thread in metadata while getting context'); }}
 
                           {debug_log_fn}('[{context_get_fn}()] args', {{
                               slot,
-                              storage: thread.storage,
-                              threadID: thread.id(),
-                              taskID: threadMeta.task.id(),
-                              componentIdx: thread.componentIdx(),
+                              storage,
+                              componentIdx: ctx.componentIdx,
                           }});
 
-                          if (slot < 0 || slot >= thread.storage.length) {{ throw new Error('invalid slot for current thread'); }}
+                          if (slot < 0 || slot >= storage.length) {{ throw new Error('invalid slot for current thread'); }}
 
-                          return thread.storage[slot];
+                          return storage[slot];
                       }}
                     "#
                 );
@@ -1434,6 +1449,8 @@ impl AsyncTaskIntrinsic {
                 let store = render_args
                     .require_intrinsic(Intrinsic::Component(ComponentIntrinsic::GlobalStoreTrap));
                 let debug_log_fn = render_args.require_intrinsic(Intrinsic::DebugLog);
+                let current_registers =
+                    render_args.require_intrinsic(Intrinsic::GlobalCurrentThreadMeta);
                 let get_or_create_async_state_fn = render_args.intrinsic_call_prefix(
                     Intrinsic::Component(ComponentIntrinsic::GetOrCreateAsyncState),
                 );
@@ -1776,6 +1793,7 @@ impl AsyncTaskIntrinsic {
                                 return thread;
                             }}
                             const cstate = {get_or_create_async_state_fn}this.#componentIdx);
+                            ({current_registers}.threadTables ??= {{}})[this.#componentIdx] = cstate.threads;
                             thread.setId(cstate.threads.insert(thread));
                             this.#threads.push(thread);
                             return thread;
@@ -1797,6 +1815,8 @@ impl AsyncTaskIntrinsic {
                                 const cstate = {get_or_create_async_state_fn}this.#componentIdx);
                                 cstate.threads.remove(thread.id());
                             }}
+                            // Invalidate even storage retained by a saved register frame.
+                            thread.contextStorage.slots = undefined;
                             this.#threads = this.#threads.filter(t => t !== thread);
                             if (this.#exited && this.#threads.length === 0) {{
                                 {clear_current_task_fn}(this.#componentIdx, this.#id);
@@ -2664,7 +2684,10 @@ impl AsyncTaskIntrinsic {
                         #task;
                         #state;
                         #startFn = null;
-                        storage = [0, 0];
+                        contextStorage = {{ slots: [0, 0] }};
+
+                        get storage() {{ return this.contextStorage.slots; }}
+                        set storage(slots) {{ this.contextStorage.slots = slots; }}
 
                         constructor (opts) {{
                            if (opts?.componentIdx === undefined) {{

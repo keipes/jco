@@ -1,4 +1,5 @@
 import type {
+    ContextStorage,
     AsyncThreadClassContext,
     AsyncThreadConstructor,
     AsyncTask as AsyncTaskType,
@@ -38,7 +39,14 @@ export function initializeAsyncThreadClass(context: AsyncThreadClassContext): As
         #task: AsyncTaskType;
         #state: 'not-started' | 'running' | 'completed';
         #startFn: (() => unknown) | null = null;
-        storage = [0, 0];
+        readonly contextStorage: ContextStorage = { slots: [0, 0] };
+
+        get storage() {
+            return this.contextStorage.slots!;
+        }
+        set storage(slots: number[]) {
+            this.contextStorage.slots = slots;
+        }
 
         constructor(opts: AsyncThreadOptions) {
             if (opts?.componentIdx === undefined) {

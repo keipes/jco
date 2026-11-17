@@ -218,6 +218,8 @@ export const suspendingImport: CoreModule['suspendingImport'] = (
     return function (...args) {
         checkMayLeave(context.mayLeave, componentIdx);
         const saved = currentTaskMeta[componentIdx] ?? null;
+        const storage = (currentTaskMeta.storage ??= {});
+        const savedStorage = storage[componentIdx];
         const savedThread = saved
             ? getCurrentThread(context.threadLookup, saved.componentIdx, saved.threadID, saved.taskID)
             : null;
@@ -233,14 +235,18 @@ export const suspendingImport: CoreModule['suspendingImport'] = (
                 result = fn.apply(null, args);
             } catch (error) {
                 currentTaskMeta[componentIdx] = saved;
+                storage[componentIdx] = savedStorage;
                 if (!switchesTask) {
                     currentTaskMeta.current = saved;
+                    storage.current = savedStorage;
                 }
                 throw recordTrap(context.traps, componentIdx, error, convertsRangeErrors);
             }
             currentTaskMeta[componentIdx] = saved;
+            storage[componentIdx] = savedStorage;
             if (!switchesTask) {
                 currentTaskMeta.current = saved;
+                storage.current = savedStorage;
             }
             if (isPromiseLike(result)) {
                 Promise.resolve(result).catch(emptyFunc);
@@ -258,8 +264,10 @@ export const suspendingImport: CoreModule['suspendingImport'] = (
                 throw recordTrap(context.traps, componentIdx, error, convertsRangeErrors);
             } finally {
                 currentTaskMeta[componentIdx] = saved;
+                storage[componentIdx] = savedStorage;
                 if (!switchesTask) {
                     currentTaskMeta.current = saved;
+                    storage.current = savedStorage;
                 }
             }
         })();

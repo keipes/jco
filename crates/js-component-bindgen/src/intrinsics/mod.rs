@@ -1143,7 +1143,9 @@ impl Intrinsic {
 
             Self::GlobalCurrentTaskMeta => {
                 let name = self.name();
-                output.push_str(&format!("const {name} = {{}};\n"));
+                output.push_str(&format!(
+                    "const {name} = {{ storage: {{}}, threadTables: {{}} }};\n"
+                ));
             }
 
             Self::GetGlobalCurrentTaskMetaFn => {
@@ -1182,6 +1184,9 @@ impl Intrinsic {
                           if (args.threadID === undefined) {{ throw new TypeError('missing thread ID'); }}
                           if (args.componentIdx === undefined) {{ throw new TypeError('missing component idx'); }}
                           const {{ taskID, threadID, componentIdx }} = args;
+                          const thread = {global_current_thread_meta_obj}.threadTables?.[componentIdx]?.get(threadID);
+                          const storage = {global_current_thread_meta_obj}.storage ??= {{}};
+                          storage.current = storage[componentIdx] = thread?.taskID() === taskID ? thread.contextStorage : undefined;
                           return {global_current_thread_meta_obj}.current =
                               {global_current_thread_meta_obj}[componentIdx] = {{ threadID, taskID, componentIdx }};
                       }}
@@ -1208,8 +1213,14 @@ impl Intrinsic {
                           const {{ taskID, threadID, componentIdx, fn }} = args;
                           const previous = {global_current_thread_meta_obj}[componentIdx] ?? null;
                           const previousCurrent = {global_current_thread_meta_obj}.current ?? null;
+                          const storage = {global_current_thread_meta_obj}.storage ??= {{}};
+                          const previousStorage = storage[componentIdx];
+                          const previousCurrentStorage = storage.current;
+                          const thread = {global_current_thread_meta_obj}.threadTables?.[componentIdx]?.get(threadID);
+                          const contextStorage = thread?.taskID() === taskID ? thread.contextStorage : undefined;
 
                           try {{
+                              storage.current = storage[componentIdx] = contextStorage;
                               {global_current_thread_meta_obj}.current =
                                   {global_current_thread_meta_obj}[componentIdx] = {{ threadID, taskID, componentIdx }};
                               return fn();
@@ -1226,6 +1237,8 @@ impl Intrinsic {
                               // temporarily run under a different thread of the same component.
                               {global_current_thread_meta_obj}[componentIdx] = previous;
                               {global_current_thread_meta_obj}.current = previousCurrent;
+                              storage[componentIdx] = previousStorage;
+                              storage.current = previousCurrentStorage;
                           }}
                       }}
                     "#,
@@ -1280,9 +1293,15 @@ impl Intrinsic {
                           const {{ taskID, threadID, componentIdx, fn }} = args;
                           const previous = {global_current_thread_meta_obj}[componentIdx] ?? null;
                           const previousCurrent = {global_current_thread_meta_obj}.current ?? null;
+                          const storage = {global_current_thread_meta_obj}.storage ??= {{}};
+                          const previousStorage = storage[componentIdx];
+                          const previousCurrentStorage = storage.current;
+                          const thread = {global_current_thread_meta_obj}.threadTables?.[componentIdx]?.get(threadID);
+                          const contextStorage = thread?.taskID() === taskID ? thread.contextStorage : undefined;
 
                           let result;
                           try {{
+                              storage.current = storage[componentIdx] = contextStorage;
                               {global_current_thread_meta_obj}.current =
                                   {global_current_thread_meta_obj}[componentIdx] = {{ taskID, threadID, componentIdx }};
                               result = fn();
@@ -1293,6 +1312,8 @@ impl Intrinsic {
                               }});
                               {global_current_thread_meta_obj}[componentIdx] = previous;
                               {global_current_thread_meta_obj}.current = previousCurrent;
+                              storage[componentIdx] = previousStorage;
+                              storage.current = previousCurrentStorage;
                               throw err;
                           }}
 
@@ -1301,6 +1322,8 @@ impl Intrinsic {
                               typeof result.then !== 'function') {{
                               {global_current_thread_meta_obj}[componentIdx] = previous;
                               {global_current_thread_meta_obj}.current = previousCurrent;
+                              storage[componentIdx] = previousStorage;
+                              storage.current = previousCurrentStorage;
                               return result;
                           }}
 
@@ -1317,10 +1340,12 @@ impl Intrinsic {
                                   if ({global_current_thread_meta_obj}[componentIdx]?.threadID === threadID &&
                                       {global_current_thread_meta_obj}[componentIdx]?.taskID === taskID) {{
                                       {global_current_thread_meta_obj}[componentIdx] = null;
+                                      storage[componentIdx] = undefined;
                                   }}
                                   if ({global_current_thread_meta_obj}.current?.threadID === threadID &&
                                       {global_current_thread_meta_obj}.current?.taskID === taskID) {{
                                       {global_current_thread_meta_obj}.current = null;
+                                      storage.current = undefined;
                                   }}
                               }}
                           }})();
@@ -1360,9 +1385,12 @@ impl Intrinsic {
                           }}
 
                           {global_current_thread_meta_obj}[componentIdx] = null;
+                          const storage = {global_current_thread_meta_obj}.storage ??= {{}};
+                          storage[componentIdx] = undefined;
                           if ({global_current_thread_meta_obj}.current?.threadID === threadID &&
                               {global_current_thread_meta_obj}.current?.taskID === taskID) {{
                               {global_current_thread_meta_obj}.current = null;
+                              storage.current = undefined;
                           }}
                       }}
                     "#,
@@ -1407,6 +1435,8 @@ impl Intrinsic {
                           return function (...args) {{
                               {check_may_leave_fn}componentIdx);
                               const saved = {global_current_thread_meta_obj}[componentIdx] ?? null;
+                              const storage = {global_current_thread_meta_obj}.storage ??= {{}};
+                              const savedStorage = storage[componentIdx];
 
                               const savedThread = saved
                                   ? {get_current_thread}saved.componentIdx, saved.threadID, saved.taskID)
@@ -1424,14 +1454,22 @@ impl Intrinsic {
                                       result = fn.apply(null, args);
                                   }} catch (err) {{
                                       {global_current_thread_meta_obj}[componentIdx] = saved;
-                                      if (!switchesTask) {{ {global_current_thread_meta_obj}.current = saved; }}
+                                      storage[componentIdx] = savedStorage;
+                                      if (!switchesTask) {{
+                                          {global_current_thread_meta_obj}.current = saved;
+                                          storage.current = savedStorage;
+                                      }}
                                       // A trap is recorded before it propagates: nothing else in
                                       // the store may run after it, not even a queued call.
                                       throw {record_trap_fn}componentIdx, err, convertsRangeErrors);
                                   }}
 
                                   {global_current_thread_meta_obj}[componentIdx] = saved;
-                                  if (!switchesTask) {{ {global_current_thread_meta_obj}.current = saved; }}
+                                  storage[componentIdx] = savedStorage;
+                                  if (!switchesTask) {{
+                                          {global_current_thread_meta_obj}.current = saved;
+                                          storage.current = savedStorage;
+                                      }}
 
                                   if (result !== null &&
                                       (typeof result === 'object' || typeof result === 'function') &&
@@ -1456,7 +1494,11 @@ impl Intrinsic {
                                       throw {record_trap_fn}componentIdx, err, convertsRangeErrors);
                                   }} finally {{
                                       {global_current_thread_meta_obj}[componentIdx] = saved;
-                                      if (!switchesTask) {{ {global_current_thread_meta_obj}.current = saved; }}
+                                      storage[componentIdx] = savedStorage;
+                                      if (!switchesTask) {{
+                                          {global_current_thread_meta_obj}.current = saved;
+                                          storage.current = savedStorage;
+                                      }}
                                   }}
                               }})();
                           }};

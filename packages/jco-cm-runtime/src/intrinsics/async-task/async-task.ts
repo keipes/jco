@@ -1171,6 +1171,8 @@ export function initializeAsyncTaskClass(context: AsyncTaskClassContext): AsyncT
                 const cstate = getOrCreateAsyncState(_lookup, this.#componentIdx);
                 cstate.threads.remove(thread.id());
             }
+            // Saved register frames must not expose an exited thread's slots.
+            thread.contextStorage.slots = undefined;
             this.#threads = this.#threads.filter((t) => t !== thread);
             if (this.#exited && this.#threads.length === 0) {
                 clearCurrentThread(_clearing, this.#componentIdx, this.#id);
@@ -1196,6 +1198,7 @@ export function initializeAsyncTaskClass(context: AsyncTaskClassContext): AsyncT
                 return thread;
             }
             const cstate = getOrCreateAsyncState(_lookup, this.#componentIdx);
+            (_registers.threadTables ??= {})[this.#componentIdx] = cstate.threads;
             thread.setId(cstate.threads.insert(thread));
             this.#threads.push(thread);
             return thread;
