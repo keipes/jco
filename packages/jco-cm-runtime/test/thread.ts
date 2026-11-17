@@ -61,7 +61,7 @@ test.concurrent('context slots belong to the executing thread and restore across
                 expect(s.asyncTask.contextGet({ slot: 0 })).toBe(17);
             },
         });
-        expect(other.storage[0]).toBe(42);
+        expect(other.storage![0]).toBe(42);
         a.task.resolve([]);
         a.task.removeThread(other);
         a.task.exit({ skipExclusiveLockCheck: true });

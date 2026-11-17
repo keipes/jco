@@ -1171,6 +1171,8 @@ export function initializeAsyncTaskClass(context: AsyncTaskClassContext): AsyncT
                 const cstate = getOrCreateAsyncState(_lookup, this.#componentIdx);
                 cstate.threads.remove(thread.id());
             }
+            // A register may still name this thread; it must not find the slots of one that has exited.
+            thread.storage = null;
             this.#threads = this.#threads.filter((t) => t !== thread);
             if (this.#exited && this.#threads.length === 0) {
                 clearCurrentThread(_clearing, this.#componentIdx, this.#id);

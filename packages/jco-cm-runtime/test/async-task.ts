@@ -87,8 +87,8 @@ test.concurrent('task constructors retain store-local brands, methods, statics a
         expect(() => second.id.call(first)).toThrow(TypeError);
         expect(a.asyncTask.AsyncTask.State).not.toBe(b.asyncTask.AsyncTask.State);
         expect(a.asyncTask.AsyncTask.BlockResult).not.toBe(b.asyncTask.AsyncTask.BlockResult);
-        first.storage[0] = 23;
-        expect(second.storage[0]).toBe(0);
+        first.storage![0] = 23;
+        expect(second.storage![0]).toBe(0);
         expect(a.resource.state.scopeTasks.get(first.resourceScopeId())).toBe(first);
         expect(b.resource.state.scopeTasks.get(second.resourceScopeId())).toBe(second);
     } finally {

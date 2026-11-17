@@ -38,7 +38,7 @@ export function initializeAsyncThreadClass(context: AsyncThreadClassContext): As
         #task: AsyncTaskType;
         #state: 'not-started' | 'running' | 'completed';
         #startFn: (() => unknown) | null = null;
-        storage = [0, 0];
+        storage: number[] | null = [0, 0];
 
         constructor(opts: AsyncThreadOptions) {
             if (opts?.componentIdx === undefined) {

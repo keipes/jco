@@ -1162,7 +1162,8 @@ impl Intrinsic {
                           if (v === undefined || v === null) {{
                               return undefined;
                           }}
-                          return {{ ...v }};
+                          // (a register entry may also hold its thread, which is not part of the identity)
+                          return {{ taskID: v.taskID, threadID: v.threadID, componentIdx: v.componentIdx }};
                       }}
                     "#,
                 );

@@ -344,9 +344,21 @@ export interface TaskMeta {
     taskID: bigint;
     componentIdx: number;
 }
+/**
+ * A register entry: the identity of what is executing, and its thread once a context built-in
+ * has looked it up. Saving and restoring a register moves the entry, so the thread goes with it.
+ */
+export interface TaskFrame extends TaskMeta {
+    thread?: AsyncThread;
+}
 export interface TaskRegisters {
-    [componentIdx: number]: TaskMeta | null | undefined;
-    current?: TaskMeta | null;
+    [componentIdx: number]: TaskFrame | null | undefined;
+    current?: TaskFrame | null;
+    /**
+     * Context slots in force for a component in place of those of its threads, by component
+     * index. Set for the duration of a host call to the component's realloc.
+     */
+    contextSlots?: { [componentIdx: number]: number[] | undefined };
 }
 export interface MemoryMeta {
     componentIdx: number;
@@ -1303,7 +1315,8 @@ export interface AsyncThreadOptions {
     startFn?: () => unknown;
 }
 export interface AsyncThread extends ComponentThread {
-    storage: number[];
+    /** Context slots, or `null` once the thread has exited. */
+    storage: number[] | null;
     readonly setId: (id: number) => void;
     readonly task: () => AsyncTask;
     readonly taskID: () => bigint;
@@ -1368,7 +1381,7 @@ export interface AsyncTask extends ComponentTask, WaitableTask {
     cancelRequested: boolean;
     alwaysTaskReturn: boolean;
     returnCalls: number;
-    storage: number[];
+    storage: number[] | null;
     tmpRetI64HighBits: number;
     callbackFnIdx?: number | null;
     readonly taskState: () => TaskState;
@@ -1719,6 +1732,11 @@ export interface AsyncTaskModule {
         value: number,
     ) => void;
     readonly contextGet: (context: ThreadLookupContext, options: { componentIdx?: number; slot: number }) => number;
+    readonly isolateRealloc: (
+        context: ThreadLookupContext,
+        componentIdx: number,
+        realloc: AsyncStringRealloc,
+    ) => AsyncStringRealloc;
     readonly taskReturn: (context: TaskReturnRuntimeContext, options: TaskReturnOptions, ...params: unknown[]) => void;
     readonly subtaskDrop: (context: SubtaskDropContext, componentIdx: number, rep: number) => void;
     readonly asyncYield: (
@@ -1812,6 +1830,7 @@ export interface HostPromisingPlatform {
 export interface HostPrepareContext extends TaskLookupContext, TrapContext {
     readonly creation: TaskCreateContext;
     readonly mayBlock: TaskMayBlockGlobal;
+    readonly lookup: ComponentStateLookupContext;
 }
 export interface HostSyncStartContext extends TaskLookupContext {
     readonly componentIdxs: readonly number[];

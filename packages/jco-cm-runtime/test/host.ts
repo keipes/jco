@@ -356,7 +356,7 @@ test.concurrent('sync start restores a spawned caller thread and returns fused r
     try {
         const [parent] = s.asyncTask.createNewCurrentTask({ componentIdx: 0, isAsync: true });
         const worker = parent.addThread(new s.asyncTask.AsyncThread({ componentIdx: 0, task: parent }));
-        worker.storage[0] = 61;
+        worker.storage![0] = 61;
         s.core.setCurrentTaskMeta({ componentIdx: 0, taskID: parent.id(), threadID: worker.id() });
         s.host.prepareCall(
             0,

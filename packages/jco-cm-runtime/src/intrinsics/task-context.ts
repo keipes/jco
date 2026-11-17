@@ -21,7 +21,12 @@ function validate(args: TaskMeta) {
 
 export const getCurrentTaskMeta: CoreModule['getCurrentTaskMeta'] = (registers, componentIdx) => {
     const value = componentIdx === undefined || componentIdx === null ? registers.current : registers[componentIdx];
-    return value === undefined || value === null ? undefined : { ...value };
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+    // (a register entry may also hold its thread, which is not part of the identity)
+    const { taskID, threadID, componentIdx: idx } = value;
+    return { taskID, threadID, componentIdx: idx };
 };
 
 export const setCurrentTaskMeta: CoreModule['setCurrentTaskMeta'] = (registers, args) => {
